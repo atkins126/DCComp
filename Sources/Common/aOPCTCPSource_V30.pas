@@ -51,6 +51,8 @@ type
 
     function LockAndGetStringsCommand(aCommand: string): string;
 
+    function LockAndGetResultCommandFmt(aCommand: string; const Args: array of TVarRec): string;
+
     function ExtractValue(var aValues: string;
       var aValue: string; var aErrorCode: integer; var aErrorStr: string; var aMoment: TDateTime): Boolean; override;
 
@@ -64,6 +66,15 @@ type
 
     function GetClientList: string; override;
     function GetThreadList: string; override;
+
+    function GetDataFileList(const aPath: string; const aMask: string = ''): string;
+    procedure GetDataFile(aStream: TStream; const aFileName: string; aStartPos: Integer);
+    procedure GetDataFiles(aStream: TStream; aFiles: TStrings);
+
+    function GetFileList(const aPath: string; const aMask: string = '*.*'; aRecursive: Boolean = False): string;
+    procedure DownloadFile(aStream: TStream; const aFileName: string);
+
+
     function GetThreadProp(aThreadName: string): string; override;
     function SetThreadState(ConnectionName: string; aNewState: boolean): string; override;
     function SetThreadLock(ConnectionName: string; aLockState: boolean): string; override;
@@ -79,8 +90,8 @@ type
 
     procedure ChangePassword(aUser, aOldPassword, aNewPassword: string); override;
 
-    procedure GetFile(aFileName: string; var aStream: TMemoryStream); override;
-    procedure UploadFile(aFileName: string); override;
+    procedure GetFile(aFileName: string; aStream: TStream); override;
+    procedure UploadFile(aFileName: string; aDestDir: string = ''); override;
 
     //function GetSensorProperties(id: string): TSensorProperties; override;
     function GetSensorPropertiesEx(id: string): string; override;
@@ -114,7 +125,7 @@ type
 
     procedure InsertValues(PhysID: string; aBuffer: TSensorDataArr); override;
 
-    function GetValue(PhysID: string): string; override;
+    function GetValue(PhysID: string; aAsText: Boolean = False): string; override;
     function GetValueText(PhysID: string): string;
 
     function SetSensorValue(PhysID, Value: string; Moment: TDateTime = 0): string; override;
@@ -124,6 +135,7 @@ type
     function GetSensorValueText(PhysID: String; var ErrorCode: integer; var ErrorString: String; var Moment: TDateTime): string;
 
     function GetSensorValueOnMoment(PhysID: String; var Moment: TDateTime): string; override;
+    function GetSensorsValueOnMoment(PhysIDs: string; Moment: TDateTime): string; override;
 
     function GetPermissions(PhysIDs: string): string; override;
 
@@ -155,6 +167,12 @@ type
     procedure GetSchedule(aSensorID: string; aStream: TStream);
 
     //procedure AddSCSTracker(aParams:
+
+    function Report(aParams: string): string;
+    function JSONReport(aParam: string): string;
+
+
+
 
   published
     property Encrypt: Boolean read FEncrypt write SetEncrypt default False;
@@ -301,6 +319,69 @@ begin
   SendCommandFmt(aCommand, Args);
   CheckCommandResult;
 end;
+
+procedure TaOPCTCPSource_V30.DownloadFile(aStream: TStream; const aFileName: string);
+var
+  aSize: integer;
+  aBlockSize: Integer;
+  aCanceled: Boolean;
+begin
+  Assert(Assigned(aStream), 'Не создан поток');
+
+  LockConnection('DownloadFile');
+  try
+    DoConnect;
+    DoCommandFmt('DownloadFile %s', [Trim(aFileName)]);
+    aSize := StrToInt(ReadLn);
+
+    aCanceled := False;
+    aStream.Position := 0;
+    aBlockSize := Min(cPV30_BlockSize, aSize - aStream.Position);
+    while aStream.Position < aSize do
+    begin
+      ReadStream(aStream, aBlockSize);
+      if Assigned(OnProgress) then
+      begin
+        OnProgress(aStream.Position, aSize, aCanceled);
+        if aCanceled then
+          Break;
+      end;
+      aBlockSize := Min(cPV30_BlockSize, aSize - aStream.Position);
+    end;
+  finally
+    UnLockConnection('DownloadFile');
+  end;
+
+  if aCanceled then
+  begin
+    Disconnect;
+    Reconnect;
+    raise EOPCTCPOperationCanceledException.Create('Выполнение прервано пользователем');
+  end;
+
+end;
+
+//begin
+//  Assert(Assigned(aStream), 'Не создан поток');
+//
+//  LockConnection('DownloadFile');
+//  try
+//    try
+//      DoConnect;
+//
+//      DoCommand(Format('DownloadFile %s', [aFileName]));
+//      ReadStream(aStream);
+//
+//      aStream.Position := 0;
+//    except
+//      on e: EIdException do
+//        if ProcessTCPException(e) then
+//          raise;
+//    end;
+//  finally
+//    UnLockConnection('DownloadFile');
+//  end;
+//end;
 
 procedure TaOPCTCPSource_V30.DownloadSetup(aFileName: string; aStream: TStream);
 var
@@ -630,6 +711,61 @@ begin
   Result := LockAndGetStringsCommand('GetClientList');
 end;
 
+procedure TaOPCTCPSource_V30.GetDataFile(aStream: TStream; const aFileName: string; aStartPos: Integer);
+begin
+  Assert(Assigned(aStream), 'Не создан поток');
+
+  LockConnection('GetDataFile');
+  try
+    try
+      DoConnect;
+
+      DoCommand(Format('GetDataFile %s;%d', [aFileName, aStartPos]));
+      ReadStream(aStream);
+
+      aStream.Position := 0;
+    except
+      on e: EIdException do
+        if ProcessTCPException(e) then
+          raise;
+    end;
+  finally
+    UnLockConnection('GetDataFile');
+  end;
+end;
+
+function TaOPCTCPSource_V30.GetDataFileList(const aPath: string; const aMask: string = ''): string;
+begin
+  if aMask = '' then
+    Result := LockAndGetStringsCommand(Format('GetDataFileList %s', [aPath]))
+  else
+    Result := LockAndGetStringsCommand(Format('GetDataFileList %s;%s', [aPath, aMask]));
+end;
+
+procedure TaOPCTCPSource_V30.GetDataFiles(aStream: TStream; aFiles: TStrings);
+begin
+  Assert(Assigned(aStream), 'Не создан поток');
+
+  LockConnection('GetDataFiles');
+  try
+    try
+      DoConnect;
+
+      aFiles.LineBreak := ';';
+      DoCommand(Format('GetDataFiles %s', [aFiles.Text]));
+      ReadStream(aStream);
+
+      aStream.Position := 0;
+    except
+      on e: EIdException do
+        if ProcessTCPException(e) then
+          raise;
+    end;
+  finally
+    UnLockConnection('GetDataFiles');
+  end;
+end;
+
 function TaOPCTCPSource_V30.GetDeviceProperties(id: string): string;
 begin
   Result := LockAndGetStringsCommand(Format('GetDeviceProperties %s', [id]));
@@ -641,7 +777,7 @@ begin
   Result := FEncrypt;
 end;
 
-procedure TaOPCTCPSource_V30.GetFile(aFileName: string; var aStream: TMemoryStream);
+procedure TaOPCTCPSource_V30.GetFile(aFileName: string; aStream: TStream);
 var
   aSize: integer;
   aBlockSize: Integer;
@@ -680,6 +816,14 @@ begin
     raise EOPCTCPOperationCanceledException.Create('Выполнение прервано пользователем');
   end;
 
+end;
+
+function TaOPCTCPSource_V30.GetFileList(const aPath, aMask: string; aRecursive: Boolean): string;
+begin
+  if aRecursive then
+    Result := LockAndGetStringsCommand(Format('GetFileList %s;%s;1', [aPath, aMask]))
+  else
+    Result := LockAndGetStringsCommand(Format('GetFileList %s;%s;0', [aPath, aMask]))
 end;
 
 function TaOPCTCPSource_V30.GetGroupProperties(id: string): string;
@@ -812,7 +956,7 @@ begin
   Result := LockAndGetStringsCommand('GetUsers');
 end;
 
-function TaOPCTCPSource_V30.GetValue(PhysID: string): string;
+function TaOPCTCPSource_V30.GetValue(PhysID: string; aAsText: Boolean = False): string;
 var
   aStr: String;
   aErrorCode: Integer;
@@ -823,7 +967,12 @@ begin
   try
     try
       DoConnect;
-      DoCommandFmt('GetValue %s', [PhysID]);
+
+      if aAsText then
+        DoCommandFmt('GetValue %s;1', [PhysID])
+      else
+        DoCommandFmt('GetValue %s', [PhysID]);
+
       aStr := ReadLn;
       ExtractValue(aStr, Result, aErrorCode, aErrorString, aMoment);
     except
@@ -880,6 +1029,11 @@ begin
   finally
     UnLockConnection;
   end;
+end;
+
+function TaOPCTCPSource_V30.JSONReport(aParam: string): string;
+begin
+  Result := LockAndGetResultCommandFmt('JSONReport %s', [aParam]);
 end;
 
 //function TaOPCTCPSource_V30.GetSensorProperties(id: string): TSensorProperties;
@@ -952,6 +1106,27 @@ end;
 function TaOPCTCPSource_V30.GetSensorsReadError: string;
 begin
   Result := LockAndGetStringsCommand('GetSensorsReadError');
+end;
+
+function TaOPCTCPSource_V30.GetSensorsValueOnMoment(PhysIDs: string; Moment: TDateTime): string;
+var
+  p: integer;
+  Str: string;
+begin
+  LockConnection;
+  try
+    try
+      DoConnect;
+      DoCommandFmt('GetValuesOnMoment %s;%s', [DateTimeToStr(DateToServer(Moment), OpcFS), PhysIDs]);
+      Result := ReadLn; // значения через ; (точку с запятой)
+    except
+      on e: EIdException do
+        if ProcessTCPException(e) then
+          raise;
+    end;
+  finally
+    UnLockConnection;
+  end;
 end;
 
 function TaOPCTCPSource_V30.GetSensorsValues(PhysIDs: String): string;
@@ -1169,6 +1344,29 @@ begin
 //  end;
 end;
 
+function TaOPCTCPSource_V30.LockAndGetResultCommandFmt(aCommand: string;
+  const Args: array of TVarRec): string;
+begin
+  Result := '';
+  LockConnection;
+  try
+    try
+      DoConnect;
+      DoCommandFmt(aCommand, Args);
+      //CheckCommandResult;
+
+      // читаем данные
+      Result := ReadLn;
+    except
+      on e: EIdException do
+        if ProcessTCPException(e) then
+          raise;
+    end;
+  finally
+    UnLockConnection;
+  end;
+end;
+
 function TaOPCTCPSource_V30.LockAndGetStringsCommand(aCommand: string): string;
 var
   aByteCount: integer;
@@ -1285,6 +1483,11 @@ end;
 procedure TaOPCTCPSource_V30.ReloadRoles;
 begin
   LockAndDoCommand('ReloadRoles');
+end;
+
+function TaOPCTCPSource_V30.Report(aParams: string): string;
+begin
+  Result := HexToStr(LockAndGetResultCommandFmt('Report %s', [StrToHex(aParams, '')]), '');
 end;
 
 function TaOPCTCPSource_V30.GetUserObjectPermission(aObjectID: Integer; aObjectTable: TDCObjectTable): string;
@@ -1703,7 +1906,7 @@ begin
   end;
 end;
 
-procedure TaOPCTCPSource_V30.UploadFile(aFileName: string);
+procedure TaOPCTCPSource_V30.UploadFile(aFileName: string; aDestDir: string = '');
 var
   aStream: TFileStream;
 begin
@@ -1712,7 +1915,7 @@ begin
     aStream := TFileStream.Create(Trim(aFileName), fmOpenRead or fmShareDenyNone);
     try
       DoConnect;
-      DoCommandFmt('UploadFile %s', [aFileName]);
+      DoCommandFmt('UploadFile %s;%s', [aFileName, aDestDir]);
       WriteStream(aStream);
     finally
       aStream.Free;

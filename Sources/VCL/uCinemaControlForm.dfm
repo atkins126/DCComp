@@ -21,4 +21,14 @@ object CinemaControlForm: TCinemaControlForm
   OnShow = FormShow
   PixelsPerInch = 96
   TextHeight = 13
+  object aOPCCinemaControl1: TaOPCCinemaControl
+    Left = 0
+    Top = 0
+    Width = 339
+    Height = 68
+    Align = alClient
+    TabOrder = 0
+    TabStop = True
+    StepMode = smNextMoment
+  end
 end
